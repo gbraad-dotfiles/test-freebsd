@@ -1,0 +1,73 @@
+name: Build FreeBSD machine image
+
+on:
+  workflow_call:
+    inputs:
+      machine_name:
+        required: true
+        type: string
+
+jobs:
+  build-and-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Dotfiles (install from action)
+        uses: gbraad-dotfiles/install-action@main
+        with:
+          upstream: true
+
+      - name: Install required virtualization software
+        continue-on-error: true
+        uses: gbraad-actions/setup-virtualization@v2
+
+      - name: Install containers tools (optional)
+        continue-on-error: true
+        uses: gbraad-actions/setup-container-tools@v1
+
+      - name: Install packer
+        uses: gbraad-actions/install-packer@v1
+
+      - name: Install machinefile
+        uses: gbraad-actions/zsh-action@main
+        with:
+          as_user: runner
+          run: |
+            app machinefile install
+
+      - name: Cache FreeBSD Base Image
+        id: cache-freebsd
+        uses: actions/cache@v4
+        with:
+          path: freebsd.img
+          key: freebsd-15.1-release-v1
+
+      - name: Download (unless cached)
+        if: steps.cache-freebsd.outputs.cache-hit != 'true'
+        run: |
+          URL="https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+          curl -L -o freebsd.img.xz "$URL"
+          xz -d freebsd.img.xz
+
+      - name: Run packer init and build process
+        uses: gbraad-actions/zsh-action@main
+        with:
+          as_user: runner
+          run: |
+            packer init  .packer/${{ inputs.machine_name }}/machine.pkr.hcl
+            packer build .packer/${{ inputs.machine_name }}/machine.pkr.hcl
+
+      - name: Create and push disk image
+        run: |
+          TAG=$(date +'%y%m%d')
+
+          podman build -t ghcr.io/gbraad-dotfiles/${{ inputs.machine_name }}-disk:latest -f .packer/${{ inputs.machine_name }}/Containerfile-disk .
+          podman tag ghcr.io/gbraad-dotfiles/${{ inputs.machine_name }}-disk:latest ghcr.io/gbraad-dotfiles/${{ inputs.machine_name }}-disk:${TAG}
+
+          podman login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+
+          podman push ghcr.io/gbraad-dotfiles/${{ inputs.machine_name }}-disk:latest
+          podman push ghcr.io/gbraad-dotfiles/${{ inputs.machine_name }}-disk:${TAG}
